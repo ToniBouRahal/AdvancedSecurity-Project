@@ -1,7 +1,7 @@
 import requests
 import time
 
-TARGET_URL = "http://127.0.0.1:5000/login"
+TARGET_URL = "http://security.login.app.project:5000/login"
 
 def brute_force():
     username = "alice"

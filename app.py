@@ -1,231 +1,566 @@
 from flask import Flask, request, render_template_string
-import sqlite3
-import time
-from datetime import datetime, timedelta
-import joblib
 import os
-import numpy as np
-
-DB_PATH = "login.db"
-MODEL_PATH = "model.joblib"   # will be created later
+import requests
 
 app = Flask(__name__)
 
-# Hardcoded "database" of users
+# URL of your external AI Guard service
+AI_GUARD_URL = os.environ.get(
+    "AI_GUARD_URL",
+    "http://127.0.0.1:5001/api/log_and_decide"
+)
+
+# Demo user database
 VALID_USERS = {
     "alice": "password123"
 }
 
-# HTML template (very simple)
+# ------------------------------------------------------------
+# Global CSS (no Python formatting here)
+# ------------------------------------------------------------
+
+BASE_STYLE = """
+<style>
+  :root {
+    --bg-gradient: linear-gradient(135deg, #1e293b, #0f172a 60%, #020617);
+    --accent: #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.16);
+    --accent-strong: #0ea5e9;
+    --danger: #f97373;
+    --danger-soft: rgba(248, 113, 113, 0.15);
+    --text-main: #e5e7eb;
+    --text-muted: #9ca3af;
+    --card-bg: rgba(15, 23, 42, 0.9);
+    --card-border: rgba(148, 163, 184, 0.35);
+    --radius-xl: 18px;
+    --shadow-soft: 0 24px 60px rgba(15, 23, 42, 0.9);
+    --transition-fast: 0.18s ease-out;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.3), transparent 55%),
+      radial-gradient(circle at bottom right, rgba(236, 72, 153, 0.25), transparent 55%),
+      var(--bg-gradient);
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .page-shell {
+    width: 100%;
+    max-width: 420px;
+  }
+
+  .card {
+    background: var(--card-bg);
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--card-border);
+    padding: 28px 26px 24px;
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(18px) saturate(140%);
+    position: relative;
+    overflow: hidden;
+    animation: fadeIn 0.35s ease-out;
+  }
+
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 60%);
+    pointer-events: none;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .card-header {
+    position: relative;
+    margin-bottom: 22px;
+  }
+
+  .card-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .card-title {
+    margin: 0;
+    font-size: 1.6rem;
+    letter-spacing: 0.02em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .logo-dot {
+    height: 11px;
+    width: 11px;
+    border-radius: 999px;
+    background: radial-gradient(circle at 30% 30%, #e0f2fe, #38bdf8);
+    box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.3);
+  }
+
+  .badge-soft {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.5);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    background: rgba(15, 23, 42, 0.9);
+  }
+
+  .badge-soft span {
+    color: var(--accent);
+  }
+
+  .card-subtitle {
+    margin-top: 6px;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+  }
+
+  .alert {
+    position: relative;
+    margin-bottom: 16px;
+    padding: 11px 12px;
+    border-radius: 12px;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    border-left: 3px solid;
+  }
+
+  .alert-danger {
+    background: var(--danger-soft);
+    border-left-color: var(--danger);
+    color: #fecaca;
+  }
+
+  .alert-info {
+    background: var(--accent-soft);
+    border-left-color: var(--accent-strong);
+    color: #e0f2fe;
+  }
+
+  .alert-icon {
+    font-size: 1.1rem;
+    line-height: 1;
+    margin-top: 1px;
+  }
+
+  .alert-text {
+    flex: 1;
+  }
+
+  .form-group {
+    margin-bottom: 16px;
+  }
+
+  .form-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+  }
+
+  .form-label .req {
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.9);
+    font-size: 0.68rem;
+  }
+
+  .input-wrapper {
+    position: relative;
+  }
+
+  .input-field {
+    width: 100%;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.6);
+    background: rgba(15, 23, 42, 0.9);
+    padding: 10px 12px;
+    padding-left: 36px;
+    font-size: 0.9rem;
+    color: var(--text-main);
+    outline: none;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+  }
+
+  .input-field::placeholder {
+    color: rgba(148, 163, 184, 0.8);
+  }
+
+  .input-field:focus {
+    border-color: var(--accent-strong);
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.8), 0 0 26px rgba(56, 189, 248, 0.4);
+    background: rgba(15, 23, 42, 0.96);
+    transform: translateY(-0.5px);
+  }
+
+  .input-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.9rem;
+    color: rgba(148, 163, 184, 0.95);
+  }
+
+  .btn-primary {
+    width: 100%;
+    border-radius: 999px;
+    border: none;
+    padding: 10px 14px;
+    margin-top: 6px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    color: #0b1120;
+    background: radial-gradient(circle at 20% 0%, #e0f2fe, #38bdf8);
+    box-shadow: 0 16px 32px rgba(56, 189, 248, 0.4);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast);
+  }
+
+  .btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 20px 40px rgba(56, 189, 248, 0.55);
+    filter: brightness(1.02);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0);
+    box-shadow: 0 12px 26px rgba(56, 189, 248, 0.45);
+    filter: brightness(0.97);
+  }
+
+  .status-icon {
+    font-size: 2.4rem;
+    margin-bottom: 10px;
+  }
+
+  .status-success {
+    color: #4ade80;
+  }
+
+  .status-block {
+    color: #fb7185;
+  }
+
+  .status-title {
+    margin: 0 0 8px;
+    font-size: 1.45rem;
+  }
+
+  .status-text {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+  }
+</style>
+"""
+
+# ------------------------------------------------------------
+# HTML templates with __STYLE__ placeholder
+# ------------------------------------------------------------
+
 LOGIN_PAGE = """
 <!doctype html>
-<title>AI Login Demo</title>
-<h2>Login</h2>
-<p style="color:red;">{{ message }}</p>
-<form method="POST">
-  <label>Username:</label><br>
-  <input type="text" name="username"><br>
-  <label>Password:</label><br>
-  <input type="password" name="password"><br>
-  {% if challenge %}
-    <p>Please answer: {{ challenge_question }}</p>
-    <input type="text" name="challenge_answer">
-    <input type="hidden" name="challenge_expected" value="{{ challenge_expected }}">
-  {% endif %}
-  <br><br>
-  <button type="submit">Login</button>
-</form>
+<html>
+<head>
+  <title>AI Login</title>
+  __STYLE__
+</head>
+<body>
+  <div class="page-shell">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title-row">
+          <h1 class="card-title">
+            <span class="logo-dot"></span>
+            AI Login Portal
+          </h1>
+          <div class="badge-soft">
+            Protected by <span>AI Guard</span>
+          </div>
+        </div>
+        <p class="card-subtitle">
+          Behaviour-aware protection against brute-force and credential stuffing attacks.
+        </p>
+      </div>
+
+      {% if message %}
+      <div class="alert alert-danger">
+        <div class="alert-icon">⚠️</div>
+        <div class="alert-text">{{ message }}</div>
+      </div>
+      {% endif %}
+
+      {% if challenge %}
+      <div class="alert alert-info">
+        <div class="alert-icon">🧠</div>
+        <div class="alert-text">
+          Suspicious login pattern detected. Please solve the verification challenge.
+        </div>
+      </div>
+      {% endif %}
+
+      <form method="POST">
+        <div class="form-group">
+          <label class="form-label">
+            <span>Username</span>
+            <span class="req">required</span>
+          </label>
+          <div class="input-wrapper">
+            <span class="input-icon">👤</span>
+            <input
+              type="text"
+              name="username"
+              class="input-field"
+              placeholder="you@example.com"
+              value="{{ username }}"
+              autocomplete="username"
+            >
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <span>Password</span>
+            <span class="req">required</span>
+          </label>
+          <div class="input-wrapper">
+            <span class="input-icon">🔒</span>
+            <input
+              type="password"
+              name="password"
+              class="input-field"
+              placeholder="••••••••"
+              autocomplete="current-password"
+            >
+          </div>
+        </div>
+
+        {% if challenge %}
+        <div class="form-group">
+          <label class="form-label">
+            <span>Verification</span>
+            <span class="req">security</span>
+          </label>
+          <div class="input-wrapper">
+            <span class="input-icon">🤖</span>
+            <input
+              type="text"
+              name="challenge_answer"
+              class="input-field"
+              placeholder="{{ challenge_question }}"
+            >
+            <input type="hidden" name="challenge_expected" value="{{ challenge_expected }}">
+            <input type="hidden" name="challenge_stage" value="1">
+          </div>
+        </div>
+        {% endif %}
+
+        <button type="submit" class="btn-primary">Continue</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
 """
 
 SUCCESS_PAGE = """
 <!doctype html>
-<title>AI Login Demo</title>
-<h2>Welcome, {{ username }}!</h2>
-<p>You logged in successfully.</p>
+<html>
+<head>
+  <title>Login Successful</title>
+  __STYLE__
+</head>
+<body>
+  <div class="page-shell">
+    <div class="card" style="text-align:center;">
+      <div class="status-icon status-success">✅</div>
+      <h2 class="status-title">Welcome, {{ username }}!</h2>
+      <p class="status-text">
+        You have successfully authenticated. Your session is now protected by AI Guard.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
 """
 
 BLOCK_PAGE = """
 <!doctype html>
-<title>Blocked</title>
-<h2>Access temporarily blocked</h2>
-<p>Suspicious activity detected from your IP. Try again later.</p>
+<html>
+<head>
+  <title>Access Blocked</title>
+  __STYLE__
+</head>
+<body>
+  <div class="page-shell">
+    <div class="card" style="text-align:center;">
+      <div class="status-icon status-block">⛔</div>
+      <h2 class="status-title">Access temporarily blocked</h2>
+      <p class="status-text">
+        Our AI detected highly suspicious activity from this IP address.
+        Please try again later or contact support if you believe this is a mistake.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
 """
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ------------------------------------------------------------
+# Helper: call external AI Guard
+# ------------------------------------------------------------
 
-def log_attempt(ip, username, success, user_agent):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO login_attempts (timestamp, ip, username, success, user_agent) VALUES (?, ?, ?, ?, ?)",
-        (int(time.time()), ip, username, int(success), user_agent),
-    )
-    conn.commit()
-    conn.close()
-
-def get_ip_decision(ip):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT decision FROM ip_decisions WHERE ip = ?", (ip,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return row[0]
-    return "allow"
-
-def set_ip_decision(ip, decision):
-    conn = get_db_connection()
-    c = conn.cursor()
-    now_ts = int(time.time())
-    c.execute(
-        "INSERT INTO ip_decisions (ip, decision, last_update) VALUES (?, ?, ?) "
-        "ON CONFLICT(ip) DO UPDATE SET decision=excluded.decision, last_update=excluded.last_update",
-        (ip, decision, now_ts),
-    )
-    conn.commit()
-    conn.close()
-
-def load_model():
-    if os.path.exists(MODEL_PATH):
-        return joblib.load(MODEL_PATH)
-    return None
-
-model = load_model()
-
-def compute_features_for_ip(ip, window_minutes=10):
+def call_ai_guard(ip, username, success, user_agent):
     """
-    Aggregate login attempts for this IP in the last `window_minutes` minutes
-    and compute the same features we use for training.
+    Call the external AI Guard service and get:
+      - decision: allow | challenge | block
+      - score: anomaly probability (0..1)
     """
-    conn = get_db_connection()
-    c = conn.cursor()
+    payload = {
+        "ip": ip,
+        "username": username,
+        "success": bool(success),
+        "user_agent": user_agent,
+    }
 
-    now = int(time.time())
-    window_start = now - window_minutes * 60
-    c.execute(
-        "SELECT timestamp, username, success FROM login_attempts "
-        "WHERE ip = ? AND timestamp >= ? ORDER BY timestamp ASC",
-        (ip, window_start),
-    )
-    rows = c.fetchall()
-    conn.close()
+    try:
+        resp = requests.post(AI_GUARD_URL, json=payload, timeout=1.0)
+        resp.raise_for_status()
+        data = resp.json()
+        decision = data.get("decision", "allow")
+        score = float(data.get("score", 0.0))
+        print(f"[AI GUARD] ip={ip} user={username} success={success} decision={decision} score={score:.2f}")
+        return decision, score
+    except Exception as e:
+        print(f"[AI GUARD ERROR] {e}")
+        # Fail open: allow if AI service is down
+        return "allow", 0.0
 
-    if not rows:
-        # No history: represent as "benign" behaviour
-        # (use same number of features as training!)
-        return np.array([0, 0, 1.0, 1, window_minutes * 60])
-
-    timestamps = [r["timestamp"] for r in rows]
-    usernames = [r["username"] for r in rows]
-    successes = [r["success"] for r in rows]
-
-    total_attempts = len(rows)
-    failed_attempts = sum(1 for s in successes if s == 0)
-    success_rate = (total_attempts - failed_attempts) / total_attempts
-    unique_usernames = len(set(usernames))
-
-    # time deltas
-    if len(timestamps) > 1:
-        deltas = [t2 - t1 for t1, t2 in zip(timestamps, timestamps[1:])]
-        min_delta = min(deltas)
-        avg_delta = sum(deltas) / len(deltas)
-    else:
-        # Only one attempt → approximate with window duration
-        min_delta = window_minutes * 60
-        avg_delta = window_minutes * 60
-
-    # Example feature vector:
-    # [total_attempts, failed_attempts, success_rate, unique_usernames, min_delta]
-    return np.array([total_attempts, failed_attempts, success_rate, unique_usernames, min_delta])
-
-def predict_decision(ip):
-    """
-    Use the trained model (if available) to decide allow/challenge/block.
-    """
-    if model is None:
-        # No model yet → allow everyone
-        return "allow"
-
-    X = compute_features_for_ip(ip).reshape(1, -1)
-    prob_attack = model.predict_proba(X)[0][1]  # probability of class "1" (attack)
-
-    # thresholds can be tuned
-    if prob_attack > 0.9:
-        return "block"
-    elif prob_attack > 0.6:
-        return "challenge"
-    else:
-        return "allow"
+# ------------------------------------------------------------
+# Routes
+# ------------------------------------------------------------
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     ip = request.remote_addr or "unknown"
     user_agent = request.headers.get("User-Agent", "unknown")
 
-    # Check if this IP is already in decision table
-    decision = get_ip_decision(ip)
+    # --- NEW: Always ask AI Guard BEFORE doing anything ---
+    # Use "success=False" for GET requests (neutral / unknown)
+    initial_decision, initial_score = call_ai_guard(ip, "", False, user_agent)
+    print(f"[WEB] initial_decision={initial_decision} score={initial_score:.2f}")
 
-    # Recompute decision using AI each time (optional but nice for demo)
-    decision = predict_decision(ip)
-    set_ip_decision(ip, decision)
+    # If already blocked -> BLOCK immediately (GET or POST)
+    if initial_decision == "block":
+        print("[WEB] IP is blocked on GET/POST:", ip)
+        return BLOCK_PAGE.replace("__STYLE__", BASE_STYLE), 403
 
-    if decision == "block":
-        return BLOCK_PAGE, 403
-
+    # ---------------------------------------------
+    # Normal login flow ONLY if not blocked
+    # ---------------------------------------------
     message = ""
     challenge = False
     challenge_question = ""
     challenge_expected = ""
-
-    if decision == "challenge":
-        challenge = True
-        # simple fake CAPTCHA: 4 + 7
-        challenge_question = "4 + 7 = ?"
-        challenge_expected = "11"
+    username = ""
 
     if request.method == "POST":
         username = request.form.get("username", "")
         password = request.form.get("password", "")
+        challenge_stage = request.form.get("challenge_stage")
+        has_challenge_answer = (challenge_stage == "1")
 
-        # If challenge is required, validate it
-        if challenge:
+        if has_challenge_answer:
             answer = request.form.get("challenge_answer", "")
             expected = request.form.get("challenge_expected", "")
             if answer.strip() != expected:
-                message = "Failed challenge."
-                log_attempt(ip, username, False, user_agent)
+                decision, score = call_ai_guard(ip, username, False, user_agent)
+
+                if decision == "block":
+                    return BLOCK_PAGE.replace("__STYLE__", BASE_STYLE), 403
+
+                message = "Failed verification challenge."
                 return render_template_string(
-                    LOGIN_PAGE,
+                    LOGIN_PAGE.replace("__STYLE__", BASE_STYLE),
                     message=message,
-                    challenge=challenge,
-                    challenge_question=challenge_question,
-                    challenge_expected=challenge_expected,
+                    challenge=False,
+                    username=username,
                 )
 
         # Check credentials
-        success = False
-        if username in VALID_USERS and VALID_USERS[username] == password:
-            success = True
+        success = (username in VALID_USERS and VALID_USERS[username] == password)
 
-        # Log this attempt
-        log_attempt(ip, username, success, user_agent)
+        # Ask guard again with real login data
+        decision, score = call_ai_guard(ip, username, success, user_agent)
+
+        if decision == "block":
+            return BLOCK_PAGE.replace("__STYLE__", BASE_STYLE), 403
+
+        if decision == "challenge" and not has_challenge_answer:
+            return render_template_string(
+                LOGIN_PAGE.replace("__STYLE__", BASE_STYLE),
+                message="Additional verification required.",
+                challenge=True,
+                challenge_question="4 + 7 = ?",
+                challenge_expected="11",
+                username=username,
+            )
 
         if success:
-            return render_template_string(SUCCESS_PAGE, username=username)
+            return render_template_string(
+                SUCCESS_PAGE.replace("__STYLE__", BASE_STYLE),
+                username=username,
+            )
         else:
             message = "Invalid credentials."
 
+    # Render login form (only for allowed / challenged)
     return render_template_string(
-        LOGIN_PAGE,
+        LOGIN_PAGE.replace("__STYLE__", BASE_STYLE),
         message=message,
         challenge=challenge,
         challenge_question=challenge_question,
         challenge_expected=challenge_expected,
+        username=username,
     )
 
+
+# ------------------------------------------------------------
+# Main
+# ------------------------------------------------------------
+
 if __name__ == "__main__":
-    # For demo only – do NOT use debug=True in real production
+    print("[+] Web app running at http://127.0.0.1:5000/login")
+    print(f"[+] Using AI Guard at {AI_GUARD_URL}")
     app.run(host="0.0.0.0", port=5000, debug=True)
