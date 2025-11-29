@@ -39,7 +39,7 @@ def init_db():
         )
     """)
 
-    # decisions per IP
+    # decisions per IP (global per IP, not per app)
     c.execute("""
         CREATE TABLE IF NOT EXISTS ip_decisions (
             ip TEXT PRIMARY KEY,
@@ -50,6 +50,56 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def get_blocked_ips():
+    """
+    Return a list of {ip, app, last_update, last_seen} for all IPs
+    that are currently in 'block' state, per app/website.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    # all IPs that are currently blocked
+    c.execute("""
+        SELECT ip, decision, last_update
+        FROM ip_decisions
+        WHERE decision = 'block'
+        ORDER BY last_update DESC
+    """)
+    blocked_rows = c.fetchall()
+
+    results = []
+
+    for row in blocked_rows:
+        ip = row["ip"]
+        last_update = row["last_update"]
+
+        # find all apps this IP has interacted with
+        c_apps = conn.cursor()
+        c_apps.execute("SELECT DISTINCT app FROM login_attempts WHERE ip = ?", (ip,))
+        apps_rows = c_apps.fetchall()
+        apps = [ar["app"] if ar["app"] is not None else "default" for ar in apps_rows] or ["default"]
+
+        # for each app, compute last_seen (last login attempt for that app)
+        for app_name in apps:
+            c_last = conn.cursor()
+            c_last.execute(
+                "SELECT MAX(timestamp) AS last_ts FROM login_attempts WHERE ip = ? AND app = ?",
+                (ip, app_name),
+            )
+            last_row = c_last.fetchone()
+            last_seen = last_row["last_ts"] if last_row and last_row["last_ts"] else None
+
+            results.append({
+                "ip": ip,
+                "app": app_name,
+                "last_update": last_update,
+                "last_seen": last_seen,
+            })
+
+    conn.close()
+    return results
 
 # -------- ML model --------
 
@@ -134,7 +184,6 @@ def compute_features_for_ip(ip, window_minutes=10):
     if len(timestamps) > 1:
         deltas = [t2 - t1 for t1, t2 in zip(timestamps, timestamps[1:])]
         min_delta = min(deltas)
-        # avg_delta = sum(deltas) / len(deltas)  # you can add if needed
     else:
         min_delta = window_minutes * 60
 
@@ -221,6 +270,10 @@ ADMIN_TEMPLATE = """
 <body>
   <h1>AI Login Guard - Admin Dashboard</h1>
   <p>Key: <code>{{ admin_key }}</code> (query ?key=... to protect access in demos)</p>
+
+  <p>
+    <a href="/admin/blocked?key={{ admin_key }}">View blocked IPs</a>
+  </p>
 
   <h2>Per-IP Anomaly Score (live)</h2>
   <canvas id="scoreChart" width="800" height="300"></canvas>
@@ -382,6 +435,159 @@ def api_admin_scores():
         "ip_scores": ip_scores,
         "recent_attempts": recent_attempts
     })
+
+# -------- Blocked IPs admin view + unblock --------
+
+@app.route("/admin/blocked")
+def admin_blocked():
+    key = request.args.get("key", "")
+    if key != ADMIN_KEY:
+        return "Forbidden (invalid key)", 403
+
+    blocked = get_blocked_ips()
+
+    def fmt_ts(ts):
+        if not ts:
+            return "–"
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    html = """
+    <!doctype html>
+    <html>
+    <head>
+      <title>AI Guard – Blocked IPs</title>
+      <style>
+        body {
+          font-family: system-ui, sans-serif;
+          background: #0f172a;
+          color: #e5e7eb;
+          padding: 24px;
+        }
+        h1 { margin-bottom: 8px; }
+        p.meta { font-size: 0.85rem; color: #9ca3af; }
+        table {
+          border-collapse: collapse;
+          width: 100%%;
+          margin-top: 16px;
+          background: #020617;
+        }
+        th, td {
+          border: 1px solid #1f2937;
+          padding: 8px 10px;
+          font-size: 0.88rem;
+        }
+        th {
+          background: #111827;
+        }
+        tr:nth-child(even) { background: #020617; }
+        tr:nth-child(odd) { background: #020314; }
+        form { margin: 0; }
+        button {
+          background: #ef4444;
+          color: white;
+          border: none;
+          padding: 4px 10px;
+          border-radius: 999px;
+          cursor: pointer;
+          font-size: 0.78rem;
+        }
+        button:hover { background: #dc2626; }
+        .tag {
+          display: inline-block;
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: #1e293b;
+          font-size: 0.78rem;
+        }
+        a {
+          color: #38bdf8;
+          text-decoration: none;
+        }
+        a:hover {
+          text-decoration: underline;
+        }
+      </style>
+    </head>
+    <body>
+      <h1>Blocked IPs</h1>
+      <p class="meta">
+        These IPs are currently in <strong>block</strong> state.
+        Decision is global per IP, but we show the apps/websites they accessed.
+      </p>
+      <p class="meta">
+        <a href="/admin?key=""" + ADMIN_KEY + """">← Back to main admin dashboard</a>
+      </p>
+      <table>
+        <tr>
+          <th>App / Website</th>
+          <th>IP</th>
+          <th>Last decision update</th>
+          <th>Last login attempt</th>
+          <th>Action</th>
+        </tr>
+    """
+
+    for row in blocked:
+        ip = row["ip"]
+        app_name = row["app"]
+        last_update = fmt_ts(row["last_update"])
+        last_seen = fmt_ts(row["last_seen"])
+
+        html += f"""
+        <tr>
+          <td><span class="tag">{app_name}</span></td>
+          <td>{ip}</td>
+          <td>{last_update}</td>
+          <td>{last_seen}</td>
+          <td>
+            <form method="post" action="/admin/unblock?key={ADMIN_KEY}">
+              <input type="hidden" name="ip" value="{ip}">
+              <input type="hidden" name="app" value="{app_name}">
+              <button type="submit">Unblock</button>
+            </form>
+          </td>
+        </tr>
+        """
+
+    html += """
+      </table>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route("/admin/unblock", methods=["POST"])
+def admin_unblock():
+    key = request.args.get("key", "")
+    if key != ADMIN_KEY:
+        return "Forbidden (invalid key)", 403
+
+    ip = request.form.get("ip")
+    app_name = request.form.get("app")
+
+    if not ip:
+        return "Missing ip", 400
+
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    # unblock globally for this IP
+    c.execute("DELETE FROM ip_decisions WHERE ip = ?", (ip,))
+
+    # OPTIONAL: also clear login history for this IP+app,
+    # so behaviour restarts clean for that website
+    if app_name:
+        c.execute("DELETE FROM login_attempts WHERE ip = ? AND app = ?", (ip, app_name))
+    else:
+        c.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
+
+    conn.commit()
+    conn.close()
+
+    print(f"[ADMIN] Unblocked IP {ip} (app={app_name})")
+
+    # redirect back to blocked list
+    return f"<script>window.location.href='/admin/blocked?key={ADMIN_KEY}';</script>"
 
 # -------- main --------
 
